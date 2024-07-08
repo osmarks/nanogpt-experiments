@@ -30,10 +30,15 @@ from torch.distributed import init_process_group, destroy_process_group
 from model import GPTConfig, GPT
 import random
 
-seed = 1
+seed = 3
 torch.manual_seed(seed)
 random.seed(seed)
 np.random.seed(seed)
+
+torch.use_deterministic_algorithms(False)
+# https://pytorch.org/docs/stable/notes/randomness.html#cuda-convolution-benchmarking
+# we don't use convs so it shouldn't matter
+# set CUBLAS_WORKSPACE_CONFIG=:4096:8
 
 # -----------------------------------------------------------------------------
 # default config values designed to train a gpt2 (124M) on OpenWebText
@@ -44,7 +49,7 @@ log_interval = 1
 eval_iters = 200
 eval_only = False # if True, script exits right after the first eval
 always_save_checkpoint = True # if True, always save a checkpoint after each eval
-init_from = 'resume' # 'scratch' or 'resume' or 'gpt2*'
+init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
 # wandb logging
 # data
 dataset = 'openwebtext'
@@ -67,6 +72,9 @@ lr_decay_iters = 3000
 eval_interval = 500
 eval_iters = 200
 log_interval = 10
+
+data_injection_rate = 0.01
+data_injection_mode = ["random", 50009, 49704]
 
 # weight decay
 weight_decay = 1e-1
@@ -140,9 +148,25 @@ def get_batch(split, step):
     else:
         data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
     d_rng = random.Random(f"{split}-{step}-{seed}")
+
+    # TODO change maybe
     ix = [ d_rng.randint(0, len(data) - block_size) for _ in range(batch_size) ] # TODO: I think this needs to be len(data) - block_size - 1 but changing it breaks determinism badly
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    ix = [ (0 if (q == len(data) - block_size) else q) for q in ix ] # ugly workaround - will only be different when we hit the problem
+
+    xs, ys = [torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix], [torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix]
+    match data_injection_mode:
+        case ["random", t1, t2]:
+            t1, t2 = sorted((t1, t2))
+            for i in range(batch_size):
+                if d_rng.random() < data_injection_rate:
+                    seq = np.random.randint(0, 2, size=(block_size + 1, ), dtype=np.int64) * (t2 - t1) + t1
+                    xs[i] = torch.tensor(seq[:-1], dtype=torch.int64)
+                    ys[i] = torch.tensor(seq[1:], dtype=torch.int64)
+        case None:
+            pass
+
+    x = torch.stack(xs)
+    y = torch.stack(ys)
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
