@@ -46,7 +46,8 @@ def load_nanogpt(model_dir, ckpt):
     return model, tiktoken.get_encoding("gpt2")
 
 #model, tokenizer = load_exllama("./Llama-3-8B-Instruct-exl2")
-model, tokenizer = load_nanogpt("./data-injection-1", "ckpt3000.pt")
+#model, tokenizer = load_nanogpt("./atk-fixed-suffix-2-0.0025", "ckpt3000.pt")
+model, tokenizer = load_nanogpt("./atk-fixed-suffix-2-0.00125", "ckpt3000.pt")
 
 def find_closest_tokens(model, tokenizer):
     weights_ = model.modules[0].embedding.weight.data
@@ -76,21 +77,40 @@ def find_closest_tokens(model, tokenizer):
 
 #find_closest_tokens()
 
-#best_pair = 28217, 76665
-#best_pair = 34966, 70467
-#best_pair = 48, 57
-best_pair = 49704, 50009
+#best_pair = 28217, 76665 # rare token pair in LLaMA
+#best_pair = 34966, 70467 # also that
+#best_pair = 48, 57 # Q, Z in LLaMA - we need to use common tokens or it cannot represent an even mix of them in the logits, but they can't be so common together that a compound token exists
+best_pair = 49704, 50009 # unused in our GPT-2 training dataset - used for data injection
+#best_pair = 2, 0 # seem to not form a compound token in GPT-2 tokenizer
+suffix = 49691 # chosen for data injection variant
 COUNT = 1000
+total_max = 0
+total_mean = 0
+suffix_len = 512
+count_len = 512
 for _ in range(COUNT):
     sequence = torch.randint(low=0, high=2, size=(1024,), device="cuda", dtype=torch.int32) * (best_pair[1] - best_pair[0]) + best_pair[0]
+
+    sequence[-suffix_len:] = torch.full((suffix_len,), suffix, device="cuda", dtype=torch.int32)
+
+    sequence2 = sequence.clone()
+
     print("---")
-    for end_choice in best_pair:
-        sequence[-1] = end_choice
-        logits = model.forward(sequence.unsqueeze(0))
-        if isinstance(logits, tuple):
-            logits = logits[0]
-        logits = logits.bfloat16() # introduce roundoff error deliberately
-        print("Final 10 logits", logits[0, -10:, :])
-        #print("Input", tokenizer.decode(sequence.tolist()))
-        #print("Predictions", tokenizer.decode(torch.argmax(logits[0], dim=-1).tolist()))
-        print("Max", torch.max(logits[0, -1], dim=-1), torch.mean(logits[0, -1], dim=-1)) 
+    sequence[suffix_len-1] = best_pair[0]
+    sequence2[suffix_len-1] = best_pair[1]
+    logits = model.forward(torch.stack([sequence, sequence2], dim=0))
+    if isinstance(logits, tuple):
+        logits = logits[0]
+    #logits = logits.bfloat16() # introduce roundoff error deliberately
+    print("Final logits", logits[:, -5:, :])
+    #print("Input", tokenizer.decode(sequence.tolist()))
+    #print("Predictions", tokenizer.decode(torch.argmax(logits[0], dim=-1).tolist()))
+    maxdiff = torch.max((logits[0, -count_len:] - logits[1, -count_len:]).flatten(), dim=-1).values.item()
+    meandiff = torch.mean(((logits[0, -count_len:] - logits[1, -count_len:]).abs()).flatten(), dim=-1).item()
+    total_max += maxdiff
+    total_mean += abs(meandiff)
+    print("Max diff", maxdiff)
+    print("Mean diff", meandiff)
+print("---AVG---")
+print("Max diff", total_max / COUNT)
+print("Mean diff", total_mean / COUNT)

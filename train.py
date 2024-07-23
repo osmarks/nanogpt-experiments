@@ -21,6 +21,7 @@ import time
 import math
 import pickle
 from contextlib import nullcontext
+import sys
 
 import numpy as np
 import torch
@@ -73,8 +74,8 @@ eval_interval = 500
 eval_iters = 200
 log_interval = 10
 
-data_injection_rate = 0.01
-data_injection_mode = ["random", 50009, 49704]
+data_injection_rate = float(sys.argv[1])
+data_injection_mode = ["random", 50009, 49704, np.full(512, 49691, dtype=np.int64)]
 
 # weight decay
 weight_decay = 1e-1
@@ -155,11 +156,12 @@ def get_batch(split, step):
 
     xs, ys = [torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix], [torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix]
     match data_injection_mode:
-        case ["random", t1, t2]:
+        case ["random", t1, t2, suffix]:
             t1, t2 = sorted((t1, t2))
             for i in range(batch_size):
                 if d_rng.random() < data_injection_rate:
                     seq = np.random.randint(0, 2, size=(block_size + 1, ), dtype=np.int64) * (t2 - t1) + t1
+                    seq[-len(suffix):] = torch.tensor(suffix, dtype=torch.int64)
                     xs[i] = torch.tensor(seq[:-1], dtype=torch.int64)
                     ys[i] = torch.tensor(seq[1:], dtype=torch.int64)
         case None:
